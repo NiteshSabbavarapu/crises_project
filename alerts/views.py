@@ -52,8 +52,8 @@ class AlertTestSendView(APIView):
             user=request.user,
             digest_type=AlertDigest.DigestType.TEST,
             subject=build_digest_subject(story, AlertDigest.DigestType.TEST),
-            body_text=build_digest_body(request.user, [story]),
-            body_html=build_digest_html(request.user, [story]),
+            body_text=build_digest_body(request.user, [story], include_selected_stories=True),
+            body_html=build_digest_html(request.user, [story], include_selected_stories=True),
         )
         digest.stories.add(story)
         delivery = send_digest(digest)

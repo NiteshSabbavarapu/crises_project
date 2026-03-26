@@ -290,12 +290,22 @@ def decide_story_status(story: Story, fallback_actions: list[str]) -> dict[str, 
 
     has_local_official = any(item.raw_item.source.is_official for item in evidence)
     has_grounded_official = bool(grounded_context.get("official_sources"))
+    has_trusted_source = any(
+        item.raw_item.source.credibility_tier in {
+            item.raw_item.source.CredibilityTier.OFFICIAL,
+            item.raw_item.source.CredibilityTier.TIER_1,
+        }
+        for item in evidence
+    )
     if has_local_official or has_grounded_official:
         status = Story.Status.VERIFIED
         confidence = 85 if has_local_official else 70
     elif len({item.raw_item.source_id for item in evidence}) >= 2:
         status = Story.Status.VERIFIED
         confidence = 75
+    elif has_trusted_source:
+        status = Story.Status.VERIFIED
+        confidence = 65
     else:
         status = Story.Status.UNCONFIRMED
         confidence = 45
@@ -369,12 +379,22 @@ def generate_story_brief(story: Story, fallback_actions: list[str]) -> tuple[str
                 success=False,
             )
 
-    fallback_summary = f"Verified from {story.source_count} source(s): " + " | ".join(
-        item.raw_item.headline for item in evidence[:3]
+    location_names = []
+    for location in story.locations.select_related("state", "city", "area").all()[:3]:
+        if location.area:
+            location_names.append(location.area.name)
+        elif location.city:
+            location_names.append(location.city.name)
+        elif location.state:
+            location_names.append(location.state.name)
+    location_text = ", ".join(dict.fromkeys(location_names)) or "the tagged area"
+    source_name = evidence[0].raw_item.source.name if evidence else "a trusted source"
+    fallback_summary = (
+        f"{source_name} reported a {story.category.replace('_', ' ')} update affecting {location_text}."
     )
     if grounded_context.get("summary"):
         fallback_summary = f"{fallback_summary}\n\nGrounded web context: {grounded_context['summary']}"
-    fallback_impact = f"This may affect {story.category.replace('_', ' ')} conditions near the tagged location."
+    fallback_impact = f"This may affect {story.category.replace('_', ' ')} conditions near {location_text}."
     fallback_action_text = "\n".join(f"- {item}" for item in fallback_actions[:3])
     IntelligenceRun.objects.create(
         story=story,

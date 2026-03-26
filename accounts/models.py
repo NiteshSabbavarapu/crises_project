@@ -36,7 +36,7 @@ class UserAlertPreference(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="alert_preference"
     )
     frequency = models.CharField(
-        max_length=20, choices=Frequency.choices, default=Frequency.CRITICAL_ONLY
+        max_length=20, choices=Frequency.choices, default=Frequency.EVERY_30_MIN
     )
     categories = models.JSONField(default=list, blank=True)
     email_enabled = models.BooleanField(default=True)

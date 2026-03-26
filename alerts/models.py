@@ -111,3 +111,27 @@ class UserAlertSnapshot(models.Model):
 
     class Meta:
         ordering = ["-sent_at"]
+
+
+class UserAlertDispatchTracker(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="alert_dispatch_tracker"
+    )
+    channel = models.CharField(max_length=20, default="email")
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    last_story_fetched_at = models.DateTimeField(null=True, blank=True)
+    last_digest = models.ForeignKey(
+        AlertDigest, on_delete=models.SET_NULL, related_name="dispatch_trackers", null=True, blank=True
+    )
+    last_delivery = models.ForeignKey(
+        EmailDelivery, on_delete=models.SET_NULL, related_name="dispatch_trackers", null=True, blank=True
+    )
+    last_delivery_status = models.CharField(max_length=20, blank=True)
+    last_response_body = models.JSONField(default=dict, blank=True)
+    last_error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]

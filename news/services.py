@@ -6,7 +6,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from locations.models import Area, City
+from locations.models import Area, City, State
 from intel.models import IntelligenceRun
 from intel.services import decide_story_status, generate_story_brief
 from news.models import RawIngestItem, Story, StoryLocation, StorySourceEvidence, StoryTag
@@ -94,6 +94,9 @@ def infer_severity(text):
 def find_location_matches(text):
     normalized = normalize_text(text)
     locations = []
+    for state in State.objects.select_related("country").all():
+        if state.name.lower() in normalized:
+            locations.append({"state": state, "country": state.country})
     for city in City.objects.filter(is_active=True):
         if city.name.lower() in normalized:
             locations.append({"city": city, "state": city.state, "country": city.state.country})
@@ -117,6 +120,36 @@ def summarize_story(story):
         return "", "", ""
     fallback_actions = ACTION_TEMPLATES.get(story.category, ACTION_TEMPLATES[Story.Category.GENERAL])
     return generate_story_brief(story, fallback_actions)
+
+
+def build_fallback_story_content(story):
+    evidence = list(story.evidence.select_related("raw_item__source"))
+    fallback_actions = ACTION_TEMPLATES.get(story.category, ACTION_TEMPLATES[Story.Category.GENERAL])
+    source_name = evidence[0].raw_item.source.name if evidence else "a trusted source"
+    location_names = []
+    for location in story.locations.select_related("area", "city", "state").all()[:3]:
+        if location.area:
+            location_names.append(location.area.name)
+        elif location.city:
+            location_names.append(location.city.name)
+        elif location.state:
+            location_names.append(location.state.name)
+    location_text = ", ".join(dict.fromkeys(location_names)) or "the tagged area"
+    category_label = story.category.replace("_", " ")
+    if story.status == Story.Status.DEBUNKED:
+        summary = f"{source_name} reported that this {category_label} claim is false or misleading in {location_text}."
+    elif story.status == Story.Status.VERIFIED:
+        summary = f"{source_name} reported a verified {category_label} update affecting {location_text}."
+    else:
+        summary = f"{source_name} reported a {category_label} update linked to {location_text}; verification is still ongoing."
+    if story.status == Story.Status.DEBUNKED:
+        impact = "This appears to be false or misleading based on the currently stored evidence."
+    elif story.locations.exists():
+        impact = f"This may affect conditions in or around {location_text}."
+    else:
+        impact = "This may affect the tagged category and should be monitored for updates."
+    actions = story.action_summary or "\n".join(f"- {item}" for item in fallback_actions[:3])
+    return summary, impact, actions
 
 
 def score_story(story):
@@ -207,10 +240,10 @@ def verify_and_score_stories():
         if decision.get("official_resource_url"):
             story.official_resource_url = decision["official_resource_url"]
         story.priority_score = score_story(story)
+        story.summary = decision.get("summary", "") or story.summary
+        story.impact_summary = decision.get("impact_summary", "") or story.impact_summary
+        story.action_summary = decision.get("action_summary", "") or story.action_summary
         if story.status == Story.Status.VERIFIED or story.priority_score >= settings.ALERT_DIGEST_THRESHOLD:
-            story.summary = decision.get("summary", "") or story.summary
-            story.impact_summary = decision.get("impact_summary", "") or story.impact_summary
-            story.action_summary = decision.get("action_summary", "") or story.action_summary
             if not (story.summary and story.action_summary):
                 summary, impact, actions = summarize_story(story)
                 story.summary = story.summary or summary
@@ -220,6 +253,16 @@ def verify_and_score_stories():
                 official_item = evidence_qs.filter(raw_item__source__is_official=True).first()
                 if official_item:
                     story.official_resource_url = official_item.raw_item.url
+        if story.summary == story.headline or story.summary.startswith("Verified from "):
+            summary, impact, actions = build_fallback_story_content(story)
+            story.summary = summary
+            story.impact_summary = story.impact_summary or impact
+            story.action_summary = story.action_summary or actions
+        if not (story.summary and story.impact_summary and story.action_summary):
+            summary, impact, actions = build_fallback_story_content(story)
+            story.summary = story.summary or summary
+            story.impact_summary = story.impact_summary or impact
+            story.action_summary = story.action_summary or actions
         IntelligenceRun.objects.create(
             story=story,
             task_type=IntelligenceRun.TaskType.SCORING,

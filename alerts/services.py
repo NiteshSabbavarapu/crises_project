@@ -2,6 +2,7 @@ import hashlib
 
 from django.conf import settings
 from django.core.mail import send_mail
+from django.db.models import Max
 from django.utils.html import escape
 from django.utils import timezone
 
@@ -10,19 +11,42 @@ from news.models import Story
 from sources.models import Source
 from urllib.parse import urlparse
 
-from .models import AlertDecision, AlertDigest, EmailDelivery, UserAlertSnapshot, UserNewsDelivery
+from .models import (
+    AlertDecision,
+    AlertDigest,
+    EmailDelivery,
+    UserAlertDispatchTracker,
+    UserAlertSnapshot,
+    UserNewsDelivery,
+)
+
+CRISIS_CATEGORIES = {
+    Story.Category.SUPPLY_CRISIS,
+    Story.Category.WEATHER,
+    Story.Category.CIVIL_UNREST,
+    Story.Category.PRICE_SURGE,
+    Story.Category.HEALTH,
+}
+
+
+def is_crisis_story(story):
+    return story.category in CRISIS_CATEGORIES and story.severity != Story.Severity.LOW
 
 
 def user_matches_story(user, story):
     preferences = user.location_preferences.filter(is_primary=True).first()
-    if not preferences or not story.locations.exists():
+    if not preferences:
         return True
+    if not story.locations.exists():
+        return False
     for location in story.locations.all():
+        if preferences.state_id and location.state_id == preferences.state_id:
+            return True
         if preferences.area_id and location.area_id == preferences.area_id:
             return True
         if preferences.pincode and location.pincode == preferences.pincode:
             return True
-        if not preferences.area_id and preferences.city_id and location.city_id == preferences.city_id:
+        if preferences.city_id and location.city_id == preferences.city_id:
             return True
     return False
 
@@ -65,6 +89,11 @@ def user_has_primary_location(user):
     return get_user_primary_location(user) is not None
 
 
+def get_user_primary_state_id(user):
+    location = get_user_primary_location(user)
+    return location.state_id if location else None
+
+
 def format_user_area(location):
     if not location:
         return "Unknown area"
@@ -75,6 +104,18 @@ def format_user_area(location):
 
 def story_affects_user(user, story):
     return user_matches_story(user, story)
+
+
+def story_is_global_for_user(user, story):
+    user_state_id = get_user_primary_state_id(user)
+    if not user_state_id:
+        return False
+    if not story.locations.exists():
+        return is_crisis_story(story)
+    story_state_ids = {location.state_id for location in story.locations.all() if location.state_id}
+    if not story_state_ids:
+        return is_crisis_story(story)
+    return user_state_id not in story_state_ids
 
 
 def normalize_resource_url(url):
@@ -163,11 +204,44 @@ def is_story_recent(story, hours=12):
 
 
 def is_story_deliverable(story):
-    return story.status == Story.Status.VERIFIED and has_trusted_story_evidence(story)
+    return is_crisis_story(story) and story.status == Story.Status.VERIFIED and has_trusted_story_evidence(story)
 
 
 def is_story_global_candidate_for_user(user, story, hours=12):
-    return is_story_deliverable(story) and not story_affects_user(user, story) and is_story_recent(story, hours=hours)
+    min_priority = max(int(getattr(settings, "ALERT_DIGEST_THRESHOLD", 50) or 50), 1)
+    return (
+        is_story_deliverable(story)
+        and story_is_global_for_user(user, story)
+        and is_story_recent(story, hours=hours)
+        and story.priority_score >= min_priority
+    )
+
+
+def get_global_news_window_hours():
+    return max(int(getattr(settings, "GLOBAL_NEWS_WINDOW_HOURS", 12) or 12), 1)
+
+
+def get_scheduled_digest_interval(preference):
+    if preference.frequency == UserAlertPreference.Frequency.EVERY_30_MIN:
+        return timezone.timedelta(minutes=30)
+    if preference.frequency == UserAlertPreference.Frequency.HOURLY:
+        return timezone.timedelta(hours=1)
+    return None
+
+
+def is_scheduled_digest_due(user, preference):
+    interval = get_scheduled_digest_interval(preference)
+    if interval is None:
+        return False
+    last_digest = (
+        AlertDigest.objects.filter(user=user, digest_type=AlertDigest.DigestType.SCHEDULED)
+        .exclude(sent_at__isnull=True)
+        .order_by("-sent_at")
+        .first()
+    )
+    if not last_digest:
+        return True
+    return timezone.now() >= last_digest.sent_at + interval
 
 
 def build_user_impact_text(user, story):
@@ -178,6 +252,14 @@ def build_user_impact_text(user, story):
     return (
         f"For {area_line}: this is an awareness news item right now. "
         "No direct impact is currently tagged for your primary area, but you should stay informed."
+    )
+
+
+def build_global_impact_text(user, story):
+    area_line = format_user_area(get_user_primary_location(user))
+    return (
+        f"For {area_line}: this update is outside your state right now. "
+        "It matters for broader awareness and may affect travel, supply, policy, or connected regions if the situation expands."
     )
 
 
@@ -192,6 +274,14 @@ def build_action_text(user, story):
     )
 
 
+def build_global_action_text(user, story):
+    return (
+        "- Stay aware and monitor official updates for escalation.\n"
+        "- Do not assume direct local impact unless your state authorities issue guidance.\n"
+        "- Review the official resource if this situation expands or affects connected regions."
+    )
+
+
 def build_story_body_text(user, story):
     location = user.location_preferences.filter(is_primary=True).first()
     area_line = format_user_area(location)
@@ -203,6 +293,27 @@ def build_story_body_text(user, story):
         f"Your Area: {area_line}\n"
         f"Last updated: {timezone.localtime(timezone.now()).strftime('%d %b %Y, %I:%M %p')}\n\n"
         f"{alert_label}\n"
+        f"{story.headline}\n\n"
+        f"Status: {story.status}\n"
+        f"News: {summary}\n"
+        f"What this means for you: {impact}\n"
+        f"What you should do:\n{actions}\n"
+    )
+    official_resource = get_story_official_resource(story)
+    if official_resource:
+        body += f"Official resource: {official_resource}\n"
+    return body
+
+
+def build_global_story_body_text(user, story):
+    area_line = format_user_area(get_user_primary_location(user))
+    summary = story.summary or story.headline
+    impact = build_global_impact_text(user, story)
+    actions = build_global_action_text(user, story)
+    body = (
+        f"Your Area: {area_line}\n"
+        f"Last updated: {timezone.localtime(timezone.now()).strftime('%d %b %Y, %I:%M %p')}\n\n"
+        "AWARENESS UPDATE\n"
         f"{story.headline}\n\n"
         f"Status: {story.status}\n"
         f"News: {summary}\n"
@@ -246,6 +357,36 @@ def build_story_html(user, story):
     return html
 
 
+def build_global_story_html(user, story):
+    area_line = format_user_area(get_user_primary_location(user))
+    headline = escape(story.headline)
+    summary = escape(story.summary or story.headline)
+    impact = escape(build_global_impact_text(user, story))
+    actions = build_global_action_text(user, story)
+    action_lines = [line.lstrip("- ").strip() for line in actions.splitlines() if line.strip()]
+    action_html = "".join(f"<li>{escape(line)}</li>" for line in action_lines)
+    official_url = get_story_official_resource(story)
+    html = (
+        "<div style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #111;\">"
+        f"<p><strong>Your area:</strong> {escape(area_line)}<br>"
+        f"<strong>Last updated:</strong> {escape(timezone.localtime(timezone.now()).strftime('%d %b %Y, %I:%M %p'))}</p>"
+        "<p><strong>Awareness Update</strong></p>"
+        f"<p><strong>{headline}</strong></p>"
+        f"<p><strong>News:</strong> {summary}</p>"
+        f"<p><strong>What this means for you:</strong> {impact}</p>"
+        f"<p><strong>What you should do:</strong></p><ul>{action_html}</ul>"
+        "</div>"
+    )
+    if official_url:
+        official_html = (
+            f'<a href="{escape(official_url)}" target="_blank" rel="noopener noreferrer">{escape(official_url)}</a>'
+        )
+        html = html.replace(
+            "</div>", f"<p><strong>Official resource:</strong> {official_html}</p></div>", 1
+        )
+    return html
+
+
 def _coerce_stories(stories):
     if isinstance(stories, Story):
         return [stories]
@@ -257,12 +398,26 @@ def split_stories_for_user(user, stories):
         return [], []
     local_stories = []
     global_stories = []
+    global_news_window_hours = get_global_news_window_hours()
     for story in _coerce_stories(stories):
         if not is_story_deliverable(story):
             continue
         if story_affects_user(user, story):
             local_stories.append(story)
-        elif is_story_global_candidate_for_user(user, story):
+        elif is_story_global_candidate_for_user(user, story, hours=global_news_window_hours):
+            global_stories.append(story)
+    return local_stories, global_stories
+
+
+def split_selected_stories_for_user(user, stories):
+    if not user_has_primary_location(user):
+        return [], []
+    local_stories = []
+    global_stories = []
+    for story in _coerce_stories(stories):
+        if story_affects_user(user, story):
+            local_stories.append(story)
+        else:
             global_stories.append(story)
     return local_stories, global_stories
 
@@ -275,44 +430,56 @@ def filter_deliverable_stories_for_user(user, stories):
     )
 
 
-def _render_story_text_section(user, title, stories):
+def _render_story_text_section(user, title, stories, renderer):
     if not stories:
-        return f"{title}\nNo new items.\n"
-    blocks = [build_story_body_text(user, story) for story in stories]
+        return ""
+    blocks = [renderer(user, story) for story in stories]
     return f"{title}\n\n" + "\n\n".join(blocks)
 
 
-def _render_story_html_section(user, title, stories):
+def _render_story_html_section(user, title, stories, renderer):
     if not stories:
-        return (
-            f"<section><h2>{escape(title)}</h2>"
-            "<p>No new items.</p></section>"
-        )
-    blocks = "".join(build_story_html(user, story) for story in stories)
+        return ""
+    blocks = "".join(renderer(user, story) for story in stories)
     return f"<section><h2>{escape(title)}</h2>{blocks}</section>"
 
 
-def build_digest_body(user, stories):
-    local_stories, global_stories = filter_deliverable_stories_for_user(user, stories)
+def build_digest_body(user, stories, include_selected_stories=False):
+    if include_selected_stories:
+        local_stories, global_stories = split_selected_stories_for_user(user, stories)
+    else:
+        local_stories, global_stories = filter_deliverable_stories_for_user(user, stories)
     header = (
         f"CrisisSync update for {format_user_area(get_user_primary_location(user))}\n"
         f"Generated at: {timezone.localtime(timezone.now()).strftime('%d %b %Y, %I:%M %p')}\n"
     )
-    sections = [
-        _render_story_text_section(user, "Local News", local_stories),
-        _render_story_text_section(user, "Global News", global_stories),
-    ]
+    sections = []
+    local_section = _render_story_text_section(user, "Local News", local_stories, build_story_body_text)
+    global_section = _render_story_text_section(user, "Global News", global_stories, build_global_story_body_text)
+    if local_section:
+        sections.append(local_section)
+    if global_section:
+        sections.append(global_section)
+    if not sections:
+        sections.append("No new items.")
     return header + "\n\n" + "\n\n".join(sections)
 
 
-def build_digest_html(user, stories):
-    local_stories, global_stories = filter_deliverable_stories_for_user(user, stories)
+def build_digest_html(user, stories, include_selected_stories=False):
+    if include_selected_stories:
+        local_stories, global_stories = split_selected_stories_for_user(user, stories)
+    else:
+        local_stories, global_stories = filter_deliverable_stories_for_user(user, stories)
+    local_section = _render_story_html_section(user, "Local News", local_stories, build_story_html)
+    global_section = _render_story_html_section(user, "Global News", global_stories, build_global_story_html)
+    sections = "".join(section for section in (local_section, global_section) if section)
+    if not sections:
+        sections = "<section><p>No new items.</p></section>"
     return (
         "<div style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #111;\">"
         f"<p><strong>CrisisSync update for:</strong> {escape(format_user_area(get_user_primary_location(user)))}<br>"
         f"<strong>Generated at:</strong> {escape(timezone.localtime(timezone.now()).strftime('%d %b %Y, %I:%M %p'))}</p>"
-        f"{_render_story_html_section(user, 'Local News', local_stories)}"
-        f"{_render_story_html_section(user, 'Global News', global_stories)}"
+        f"{sections}"
         "</div>"
     )
 
@@ -325,7 +492,7 @@ def send_digest(digest):
         status=EmailDelivery.Status.PENDING,
     )
     try:
-        send_mail(
+        sent_count = send_mail(
             digest.subject,
             digest.body_text,
             settings.DEFAULT_FROM_EMAIL,
@@ -334,11 +501,26 @@ def send_digest(digest):
         )
         delivery.status = EmailDelivery.Status.SENT
         delivery.sent_at = timezone.now()
+        delivery.response_body = {
+            "channel": "email",
+            "recipient": digest.user.email,
+            "sent_count": sent_count,
+            "digest_id": digest.id,
+            "story_ids": list(digest.stories.values_list("id", flat=True)),
+            "sent_at": timezone.localtime(delivery.sent_at).isoformat(),
+        }
         digest.sent_at = delivery.sent_at
         digest.save(update_fields=["sent_at"])
     except Exception as exc:
         delivery.status = EmailDelivery.Status.FAILED
         delivery.error_message = str(exc)
+        delivery.response_body = {
+            "channel": "email",
+            "recipient": digest.user.email,
+            "digest_id": digest.id,
+            "story_ids": list(digest.stories.values_list("id", flat=True)),
+            "error": str(exc),
+        }
     delivery.save()
     return delivery
 
@@ -399,6 +581,53 @@ def get_unsent_stories_for_user(user, stories):
     return [story for story in stories if story.id not in sent_story_ids]
 
 
+def get_user_dispatch_tracker(user, channel="email"):
+    tracker, _ = UserAlertDispatchTracker.objects.get_or_create(user=user, defaults={"channel": channel})
+    if tracker.channel != channel:
+        tracker.channel = channel
+        tracker.save(update_fields=["channel"])
+    return tracker
+
+
+def get_story_latest_fetched_at(story):
+    value = getattr(story, "latest_fetched_at", None)
+    if value:
+        return value
+    return story.evidence.aggregate(latest=Max("raw_item__fetched_at"))["latest"]
+
+
+def filter_stories_after_tracker(user, stories, channel="email"):
+    tracker = get_user_dispatch_tracker(user, channel=channel)
+    if not tracker.last_story_fetched_at:
+        return list(stories)
+    filtered = []
+    for story in _coerce_stories(stories):
+        latest_fetched_at = get_story_latest_fetched_at(story)
+        if latest_fetched_at and latest_fetched_at > tracker.last_story_fetched_at:
+            filtered.append(story)
+    return filtered
+
+
+def update_dispatch_tracker(user, delivery, stories, digest=None, channel="email"):
+    tracker = get_user_dispatch_tracker(user, channel=channel)
+    tracker.last_checked_at = timezone.now()
+    tracker.last_digest = digest
+    tracker.last_delivery = delivery
+    tracker.last_delivery_status = delivery.status
+    tracker.last_response_body = delivery.response_body or {}
+    tracker.last_error_message = delivery.error_message or ""
+    if delivery.status == EmailDelivery.Status.SENT:
+        tracker.last_sent_at = delivery.sent_at
+        latest_fetched_times = [
+            latest_fetched_at
+            for latest_fetched_at in (get_story_latest_fetched_at(story) for story in _coerce_stories(stories))
+            if latest_fetched_at is not None
+        ]
+        if latest_fetched_times:
+            tracker.last_story_fetched_at = max(latest_fetched_times)
+    tracker.save()
+
+
 def record_news_deliveries(user, digest, stories):
     for story in _coerce_stories(stories):
         UserNewsDelivery.objects.get_or_create(
@@ -443,8 +672,13 @@ def create_and_send_immediate_digests():
             story__status=Story.Status.VERIFIED,
             story__priority_score__gte=settings.ALERT_IMMEDIATE_THRESHOLD,
         ).values_list("story_id", flat=True)
-        candidate_stories = list(Story.objects.filter(id__in=story_ids).order_by("-priority_score", "-published_at"))
+        candidate_stories = list(
+            Story.objects.filter(id__in=story_ids)
+            .annotate(latest_fetched_at=Max("evidence__raw_item__fetched_at"))
+            .order_by("-priority_score", "-published_at")
+        )
         unsent_stories = get_unsent_stories_for_user(preference.user, candidate_stories)
+        unsent_stories = filter_stories_after_tracker(preference.user, unsent_stories)
         local_stories, global_stories = filter_deliverable_stories_for_user(preference.user, unsent_stories)
         deliverable_stories = [*local_stories, *global_stories]
         if not deliverable_stories:
@@ -463,6 +697,7 @@ def create_and_send_immediate_digests():
         )
         digest.stories.add(*deliverable_stories)
         delivery = send_digest(digest)
+        update_dispatch_tracker(preference.user, delivery, deliverable_stories, digest=digest)
         if delivery.status == EmailDelivery.Status.SENT:
             record_news_deliveries(preference.user, digest, deliverable_stories)
             record_sent_snapshot(preference.user, digest, body_text, story_ids)
@@ -475,6 +710,8 @@ def create_scheduled_digests():
             UserAlertPreference.Frequency.HOURLY,
         }:
             continue
+        if not is_scheduled_digest_due(preference.user, preference):
+            continue
         decisions = AlertDecision.objects.filter(
             user=preference.user, mode=AlertDecision.Mode.DIGEST, should_send=True
         ).select_related("story")
@@ -483,6 +720,7 @@ def create_scheduled_digests():
             for decision in decisions
         ]
         unsent_stories = get_unsent_stories_for_user(preference.user, unsent_stories)
+        unsent_stories = filter_stories_after_tracker(preference.user, unsent_stories)
         local_stories, global_stories = filter_deliverable_stories_for_user(preference.user, unsent_stories)
         deliverable_stories = [*(local_stories[:5]), *(global_stories[:5])]
         if not deliverable_stories:
@@ -502,6 +740,7 @@ def create_scheduled_digests():
         )
         digest.stories.add(*deliverable_stories)
         delivery = send_digest(digest)
+        update_dispatch_tracker(preference.user, delivery, deliverable_stories, digest=digest)
         if delivery.status == EmailDelivery.Status.SENT:
             record_news_deliveries(preference.user, digest, deliverable_stories)
             record_sent_snapshot(preference.user, digest, body_text, story_ids)

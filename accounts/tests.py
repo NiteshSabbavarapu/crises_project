@@ -22,6 +22,11 @@ class AccountApiTests(APITestCase):
                 "email": "nitesh@example.com",
                 "password": "VerySecurePass123",
                 "password_confirm": "VerySecurePass123",
+                "country": self.country.id,
+                "state": self.state.id,
+                "city": self.city.id,
+                "area": self.area.id,
+                "pincode": self.area.pincode,
             },
             format="json",
         )
@@ -34,20 +39,6 @@ class AccountApiTests(APITestCase):
         )
         self.assertEqual(login_response.status_code, status.HTTP_200_OK)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_response.data['access']}")
-
-        location_response = self.client.post(
-            "/api/v1/profile/location",
-            {
-                "country": self.country.id,
-                "state": self.state.id,
-                "city": self.city.id,
-                "area": self.area.id,
-                "pincode": self.area.pincode,
-                "is_primary": True,
-            },
-            format="json",
-        )
-        self.assertEqual(location_response.status_code, status.HTTP_201_CREATED)
 
         pref_response = self.client.put(
             "/api/v1/profile/preferences",
@@ -67,3 +58,17 @@ class AccountApiTests(APITestCase):
         self.assertEqual(me_response.status_code, status.HTTP_200_OK)
         self.assertEqual(me_response.data["user"]["email"], "nitesh@example.com")
         self.assertEqual(len(me_response.data["locations"]), 1)
+
+    def test_register_requires_location_fields(self):
+        register_response = self.client.post(
+            "/api/v1/auth/register",
+            {
+                "username": "nitesh",
+                "email": "nitesh@example.com",
+                "password": "VerySecurePass123",
+                "password_confirm": "VerySecurePass123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(register_response.status_code, status.HTTP_404_NOT_FOUND)
