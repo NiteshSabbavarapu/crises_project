@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import AlertDecision, AlertDigest, EmailDelivery
+from .models import AlertDecision, AlertDigest, EmailDelivery, UserNewsDelivery
 
 
 @admin.register(AlertDecision)
@@ -23,3 +23,10 @@ class EmailDeliveryAdmin(admin.ModelAdmin):
     list_display = ("user", "status", "subject", "provider_message_id", "sent_at")
     list_filter = ("status",)
     search_fields = ("user__username", "user__email", "subject", "provider_message_id")
+
+
+@admin.register(UserNewsDelivery)
+class UserNewsDeliveryAdmin(admin.ModelAdmin):
+    list_display = ("user", "story", "scope", "first_sent_at", "last_sent_at")
+    list_filter = ("scope",)
+    search_fields = ("user__username", "user__email", "story__headline")

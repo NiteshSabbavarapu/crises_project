@@ -73,3 +73,41 @@ class EmailDelivery(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class UserNewsDelivery(models.Model):
+    class Scope(models.TextChoices):
+        LOCAL = "local", "Local"
+        GLOBAL = "global", "Global"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="news_deliveries"
+    )
+    story = models.ForeignKey(Story, on_delete=models.CASCADE, related_name="user_deliveries")
+    digest = models.ForeignKey(
+        AlertDigest, on_delete=models.SET_NULL, related_name="news_deliveries", null=True, blank=True
+    )
+    scope = models.CharField(max_length=20, choices=Scope.choices)
+    first_sent_at = models.DateTimeField(auto_now_add=True)
+    last_sent_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_sent_at"]
+        unique_together = ("user", "story")
+
+
+class UserAlertSnapshot(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="alert_snapshots"
+    )
+    digest = models.ForeignKey(
+        AlertDigest, on_delete=models.SET_NULL, related_name="snapshots", null=True, blank=True
+    )
+    channel = models.CharField(max_length=20, default="email")
+    content_hash = models.CharField(max_length=64, db_index=True)
+    body_text = models.TextField()
+    story_ids = models.JSONField(default=list, blank=True)
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-sent_at"]

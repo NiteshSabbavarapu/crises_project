@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import AlertDigest, EmailDelivery
+from .models import AlertDigest, EmailDelivery, UserNewsDelivery
 from news.serializers import StorySerializer
 
 
@@ -28,3 +28,11 @@ class EmailDeliverySerializer(serializers.ModelSerializer):
     class Meta:
         model = EmailDelivery
         fields = ("id", "status", "subject", "provider_message_id", "sent_at", "error_message", "digest")
+
+
+class UserNewsDeliverySerializer(serializers.ModelSerializer):
+    story = StorySerializer(read_only=True)
+
+    class Meta:
+        model = UserNewsDelivery
+        fields = ("id", "scope", "first_sent_at", "last_sent_at", "story")

@@ -72,6 +72,10 @@ def _is_official_india_url(url: str) -> bool:
     )
 
 
+def _is_trusted_grounding_url(url: str) -> bool:
+    return _is_official_india_url(url)
+
+
 def build_grounded_search_query(story: Story) -> str:
     location_names = []
     for location in story.locations.select_related("city", "area").all()[:3]:
@@ -93,9 +97,9 @@ def build_grounded_search_query(story: Story) -> str:
     )
 
 
-def gemini_web_search(query: str) -> dict[str, Any]:
+def gemini_grounded_news_search(query: str) -> dict[str, Any]:
     if not settings.GEMINI_API_KEY or not settings.GEMINI_ENABLE_WEB_SEARCH:
-        return {"summary": "", "sources": [], "success": False, "provider": "gemini"}
+        return {"summary": "", "sources": [], "official_sources": [], "trusted_sources": [], "success": False, "provider": "gemini"}
 
     client = genai.Client(api_key=settings.GEMINI_API_KEY)
     tool = types.Tool(googleSearch=types.GoogleSearch())
@@ -110,13 +114,19 @@ def gemini_web_search(query: str) -> dict[str, Any]:
         ),
     )
     sources = _extract_gemini_sources(response)
+    official_sources = [url for url in sources if _is_official_india_url(url)]
     return {
         "summary": _extract_output_text(response),
         "sources": sources,
-        "official_sources": [url for url in sources if _is_official_india_url(url)],
+        "official_sources": official_sources,
+        "trusted_sources": [url for url in sources if _is_trusted_grounding_url(url)],
         "success": True,
         "provider": "gemini",
     }
+
+
+def gemini_web_search(query: str) -> dict[str, Any]:
+    return gemini_grounded_news_search(query)
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:

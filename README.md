@@ -51,7 +51,6 @@ To send real emails through Gmail SMTP, set:
 ```env
 DJANGO_DEBUG=False
 DJANGO_EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
-EMAIL_DELIVERY_PROVIDER=smtp
 EMAIL_HOST=smtp.gmail.com
 EMAIL_PORT=587
 EMAIL_HOST_USER=your-email@gmail.com
@@ -65,8 +64,7 @@ DEFAULT_FROM_EMAIL=your-email@gmail.com
 Notes:
 
 - Use a Google App Password, not your normal Gmail password.
-- If you want SendGrid instead, set `EMAIL_DELIVERY_PROVIDER=sendgrid` and provide `SENDGRID_API_KEY`.
-- SMTP is now the default delivery provider.
+- SMTP is the only configured mail delivery path in the project.
 
 ## API docs
 - Swagger UI: `/api/docs/`

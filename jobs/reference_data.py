@@ -7,6 +7,7 @@ HYDERABAD_REFERENCE_DATA = {
         {"name": "Jubilee Hills", "pincode": "500033"},
         {"name": "Secunderabad", "pincode": "500003"},
         {"name": "Madhapur", "pincode": "500081"},
+        {"name": "Nanakramguda", "pincode": "500032"},
         {"name": "Kukatpally", "pincode": "500072"},
     ],
 }

@@ -7,6 +7,21 @@ from .models import Story
 from .serializers import StorySerializer
 
 
+def _filter_queryset_for_user_primary_location(queryset, user):
+    if not user.is_authenticated:
+        return queryset
+    location = user.location_preferences.filter(is_primary=True).first()
+    if not location:
+        return queryset.none()
+    if location.area_id:
+        return queryset.filter(locations__area_id=location.area_id)
+    if location.pincode:
+        return queryset.filter(locations__pincode=location.pincode)
+    if location.city_id:
+        return queryset.filter(locations__city_id=location.city_id)
+    return queryset.none()
+
+
 class StoryListView(generics.ListAPIView):
     serializer_class = StorySerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
@@ -48,9 +63,10 @@ class FakeNewsListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
-        return Story.objects.filter(status=Story.Status.DEBUNKED).prefetch_related(
+        queryset = Story.objects.filter(status=Story.Status.DEBUNKED).prefetch_related(
             "evidence__raw_item__source", "locations__city", "locations__area", "tags"
         )
+        return _filter_queryset_for_user_primary_location(queryset, self.request.user).distinct()
 
 
 @api_view(["GET"])

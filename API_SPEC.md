@@ -106,9 +106,11 @@ This is the current product flow exposed by the API.
 ### Flow D: Alert consumption
 
 1. System generates alert digests internally from stories.
-2. Logged-in user fetches their digests from `/alerts/`.
-3. User opens an individual digest with `/alerts/{id}`.
-4. Admin/staff user can trigger `/alerts/test-send` to generate and send a test digest from the highest-priority story.
+2. Delivered stories are stored per user with a `local` or `global` scope and are not sent again to the same user.
+3. Logged-in user fetches their digests from `/alerts/`.
+4. Logged-in user fetches all already-delivered personal news from `/alerts/news`.
+5. User opens an individual digest with `/alerts/{id}`.
+6. Admin/staff user can trigger `/alerts/test-send` to generate and send a test digest from the highest-priority story.
 
 ### Flow E: Rumor verification
 
@@ -140,6 +142,7 @@ This is the current product flow exposed by the API.
 - `PUT /profile/preferences`
 - `PUT /profile/action-profile`
 - `GET /alerts/`
+- `GET /alerts/news`
 - `GET /alerts/{id}`
 - `POST /alerts/test-send`
 - `GET /rumors/`
@@ -182,6 +185,66 @@ Response `200`
 Flow notes:
 
 - Used by clients, deployment checks, or monitoring to verify the API is reachable.
+
+## Alerts APIs
+
+### GET `/api/v1/alerts/news`
+
+Purpose:
+
+- Returns all stories that have already been delivered to the authenticated user.
+- Each delivered item is classified as either `local` or `global`.
+- This is the canonical user-specific news history API.
+
+Authentication:
+
+- Required
+
+Query parameters:
+
+- `scope`: optional, one of `local` or `global`
+
+Response `200`
+
+```json
+{
+  "count": 2,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": 11,
+      "scope": "local",
+      "first_sent_at": "2026-03-26T10:35:00Z",
+      "last_sent_at": "2026-03-26T10:35:00Z",
+      "story": {
+        "id": 7,
+        "headline": "Critical shortage confirmed in Banjara Hills",
+        "summary": "Verified update",
+        "impact_summary": "Short-term supply disruption likely.",
+        "action_summary": "Check official ration updates.",
+        "category": "supply_crisis",
+        "severity": "critical",
+        "status": "verified",
+        "priority_score": 90,
+        "confidence_score": 90,
+        "official_resource_url": "https://example.com/official",
+        "source_count": 2,
+        "published_at": "2026-03-26T10:30:00Z",
+        "detected_at": "2026-03-26T10:31:00Z",
+        "evidence": [],
+        "locations": [],
+        "tags": []
+      }
+    }
+  ]
+}
+```
+
+Behavior:
+
+- Stories are returned from newest delivered to oldest.
+- A story is stored only once per user, so previously sent items will not be sent again to that same user in later digests.
 
 ## Auth APIs
 
