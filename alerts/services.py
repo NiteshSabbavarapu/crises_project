@@ -82,7 +82,10 @@ def send_digest(digest):
         status=EmailDelivery.Status.PENDING,
     )
     try:
-        if settings.SENDGRID_API_KEY:
+        provider = getattr(settings, "EMAIL_DELIVERY_PROVIDER", "smtp").lower()
+        if provider == "sendgrid":
+            if not settings.SENDGRID_API_KEY:
+                raise ValueError("EMAIL_DELIVERY_PROVIDER is sendgrid but SENDGRID_API_KEY is missing.")
             response = send_via_sendgrid(digest.user.email, digest.subject, digest.body_text)
             delivery.provider_message_id = response.headers.get("X-Message-Id", "")
             delivery.response_body = {"status_code": response.status_code}

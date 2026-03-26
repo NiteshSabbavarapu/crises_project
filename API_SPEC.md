@@ -72,11 +72,36 @@ This is the current product flow exposed by the API.
 
 ### Flow C: Crisis intelligence consumption
 
+1. Background jobs ingest raw source items from the trusted source registry.
+2. Raw items are normalized into canonical stories.
+3. Gemini retrieves recent official Indian web context using date-aware search queries.
+4. OpenAI decides whether the story is `verified`, `unconfirmed`, or `debunked`.
+5. The system stores the decision plus summary, impact, and action guidance on the story.
+6. Client fetches normalized stories from `/stories/`.
+7. Client filters by geography, category, status, recency, or minimum priority.
+8. Client opens a single story using `/stories/{id}`.
+9. Client can fetch high-priority items with `/stories/critical`.
+10. Client can fetch debunked items with `/stories/fake-news`.
+
+### Flow C1: Story intelligence pipeline
+
 1. Client fetches normalized stories from `/stories/`.
-2. Client filters by geography, category, status, recency, or minimum priority.
-3. Client opens a single story using `/stories/{id}`.
-4. Client can fetch high-priority items with `/stories/critical`.
-5. Client can fetch debunked items with `/stories/fake-news`.
+2. Stories originate from `RawIngestItem` records created by the ingestion job.
+3. Normalization groups similar raw items under a canonical `Story`.
+4. Gemini retrieval is used to search recent official Indian sources with a date window and official-domain bias.
+5. OpenAI decisioning consumes:
+   - local evidence from stored sources
+   - Gemini grounded official context
+   - current story metadata
+6. OpenAI returns structured JSON with:
+   - `status`
+   - `confidence_score`
+   - `official_resource_url`
+   - `summary`
+   - `impact_summary`
+   - `action_summary`
+   - `rationale`
+7. If provider calls fail or keys are unavailable, the backend falls back to local heuristics.
 
 ### Flow D: Alert consumption
 
@@ -583,6 +608,34 @@ Flow notes:
 
 ## Story APIs
 
+### Story generation and verification flow
+
+The `/stories/*` endpoints are read-only views over the `Story` table. Stories are produced by a backend pipeline:
+
+1. `ingest_sources`
+   - fetches raw content from active trusted sources
+   - currently only RSS sources are ingested automatically
+2. `normalize_stories`
+   - groups similar raw items into canonical stories
+   - infers category, severity, and location matches
+3. `score_stories`
+   - calls Gemini to retrieve recent official Indian source context
+   - calls OpenAI to decide `verified`, `unconfirmed`, or `debunked`
+   - stores summary, impact summary, action summary, confidence score, and official resource URL
+   - computes `priority_score`
+
+The live AI decision flow is currently implemented in:
+
+- `intel/services.py`
+- `news/services.py`
+
+Current AI behavior:
+
+- Gemini retrieval prompt is explicitly India-focused and date-aware
+- Gemini is expected to surface official sources such as `gov.in` and `nic.in`
+- OpenAI is the final decision engine for story verification status
+- Fallback heuristics still exist if provider calls are unavailable or fail
+
 ### Story object shape
 
 Story responses use this core structure:
@@ -712,8 +765,10 @@ Flow notes:
 
 1. This is the main feed endpoint.
 2. Frontend typically combines this with user location preferences.
-3. `min_priority` is useful for showing only urgent stories.
-4. `since` is useful for incremental polling.
+3. `status` now reflects the story-decision pipeline driven by Gemini retrieval plus OpenAI decisioning when provider keys are configured.
+4. `official_resource_url` may come from the OpenAI decision output or from a local official source fallback.
+5. `min_priority` is useful for showing only urgent stories.
+6. `since` is useful for incremental polling.
 
 ### GET `/api/v1/stories/{id}`
 
@@ -833,6 +888,8 @@ Response `200`
 Flow notes:
 
 - Intended for fake-news or misinformation views.
+- A story appears here only when its stored `status` is `debunked`.
+- In the current pipeline, `debunked` can now be produced by the OpenAI decision output when official Indian sources clearly deny or correct the claim.
 
 ## Alert APIs
 
@@ -1239,6 +1296,22 @@ Reason:
 - Serializer schema marks `username` as required.
 - Create logic also contains fallback behavior to use `email` as `username` if missing.
 - Current clients should still send `username` explicitly to avoid validation mismatch.
+
+### AI decisioning depends on real provider configuration
+
+- Gemini retrieval runs only when `GEMINI_API_KEY` is present and web search is enabled.
+- OpenAI decisioning runs only when `OPENAI_API_KEY` is present.
+- If those keys are missing or calls fail, the backend falls back to heuristic verification and summary generation.
+
+### Gemini retrieval favors official Indian sources but cannot guarantee only official results
+
+- The retrieval prompt and post-processing prefer official Indian domains.
+- Final verification status is still dependent on the OpenAI decision output and fallback rules.
+
+### Story status is now pipeline-driven rather than purely source-count driven
+
+- The system still records `source_count` and uses it in priority scoring.
+- But story `status` is now primarily determined by the AI decision flow when provider calls succeed.
 
 ## 5. Recommended Frontend Usage Sequence
 

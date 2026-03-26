@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from locations.models import Area, City
 from intel.models import IntelligenceRun
-from intel.services import generate_story_brief
+from intel.services import decide_story_status, generate_story_brief
 from news.models import RawIngestItem, Story, StoryLocation, StorySourceEvidence, StoryTag
 
 
@@ -200,23 +200,40 @@ def verify_and_score_stories():
         evidence_qs = story.evidence.select_related("raw_item__source")
         distinct_sources = evidence_qs.values_list("raw_item__source_id", flat=True).distinct()
         story.source_count = len(distinct_sources)
-        has_official = evidence_qs.filter(raw_item__source__is_official=True).exists()
-        if has_official or story.source_count >= 2:
-            story.status = Story.Status.VERIFIED
-            story.confidence_score = 90 if has_official else 75
-        else:
-            story.status = Story.Status.UNCONFIRMED
-            story.confidence_score = 45
+        fallback_actions = ACTION_TEMPLATES.get(story.category, ACTION_TEMPLATES[Story.Category.GENERAL])
+        decision = decide_story_status(story, fallback_actions)
+        story.status = decision["status"]
+        story.confidence_score = decision["confidence_score"]
+        if decision.get("official_resource_url"):
+            story.official_resource_url = decision["official_resource_url"]
         story.priority_score = score_story(story)
         if story.status == Story.Status.VERIFIED or story.priority_score >= settings.ALERT_DIGEST_THRESHOLD:
-            summary, impact, actions = summarize_story(story)
-            story.summary = summary
-            story.impact_summary = impact
-            story.action_summary = actions
+            story.summary = decision.get("summary", "") or story.summary
+            story.impact_summary = decision.get("impact_summary", "") or story.impact_summary
+            story.action_summary = decision.get("action_summary", "") or story.action_summary
+            if not (story.summary and story.action_summary):
+                summary, impact, actions = summarize_story(story)
+                story.summary = story.summary or summary
+                story.impact_summary = story.impact_summary or impact
+                story.action_summary = story.action_summary or actions
             if not story.official_resource_url:
                 official_item = evidence_qs.filter(raw_item__source__is_official=True).first()
                 if official_item:
                     story.official_resource_url = official_item.raw_item.url
+        IntelligenceRun.objects.create(
+            story=story,
+            task_type=IntelligenceRun.TaskType.SCORING,
+            provider="rules",
+            model_name="story-pipeline",
+            request_payload={"story_id": story.id, "source_count": story.source_count},
+            response_payload={
+                "status": story.status,
+                "confidence_score": story.confidence_score,
+                "priority_score": story.priority_score,
+                "rationale": decision.get("rationale", ""),
+            },
+            success=True,
+        )
         story.save()
 
 
